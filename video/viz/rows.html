@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>wave mesh</title>
+<style>
+  html, body { margin: 0; background: #111; color: #bbb; font: 12px/1.5 -apple-system, "Hiragino Sans", sans-serif; }
+  canvas { display: block; width: 100%; aspect-ratio: 32 / 9; background: #000; }
+  #bar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
+  #seek { flex: 1; }
+  #ui { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 4px 24px; padding: 0 12px 12px; }
+  #ui label { display: grid; grid-template-columns: 120px 1fr 40px; white-space: nowrap; gap: 6px; align-items: center; }
+  button { font: inherit; padding: 3px 12px; }
+  #time { font-variant-numeric: tabular-nums; min-width: 190px; }
+  #msg { color: #e88; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="540"></canvas>
+<div id="bar">
+  <button id="play" disabled>読み込み中</button>
+  <input id="seek" type="range" min="0" max="300" step="0.01" value="0">
+  <span id="time"></span>
+  <span id="msg"></span>
+</div>
+<div id="ui"></div>
+
+<script>
+'use strict';
+// 音に合わせた波形。最初は横一本の線で、曲が進むと奥へ列が増えて面(メッシュ)になる。
+//   手前の列 = いま鳴っている 1/30 秒の波形
+//   奥の列   = その前の 1/30 秒、さらに前の 1/30 秒…(1コマごとに1列ずつ奥へ流れる)
+// つまり面全体が「直近 ROWS/30 秒の音」を隙間なく並べた波形になる。
+const W = 1920, H = 540, FPS = 30, SR = 48000;
+const S = SR / FPS;          // 1列の点数 = 1コマぶんの音 (1600)
+const ROWS = 96;             // 奥行きの列数 (96列 = 3.2秒ぶん)
+const AUDIO = '../../x-music-collage_v2.wav';
+
+// 広がり方(秒, 0=線だけ … 1=面いっぱい)。間はなめらかにつなぐ。
+// 25.6秒(17小節目)から開き始め、153.6秒(Break の頭)で全面。
+const GROW = [[25.6, 0], [153.6, 1]];
+const SECTIONS = [[0, 'Drone'], [51.2, 'Stirring'], [102.4, 'Pulse'], [153.6, 'Break'], [179.2, 'Chop'],
+                  [204.8, 'Peak'], [230.4, 'Breakdown'], [243.2, 'Final'], [256, 'Dissolve']];
+
+// 見た目の値(下のスライダーで動かせる)
+const P = {
+  grow:   -0.01,  // 広がり。負なら曲の進行に合わせて自動
+  tilt:    30,    // 面を見下ろす角度(度)
+  depth:   3.4,   // 面の奥行き(画面の高さの半分 = 1)
+  fov:     14,    // 遠近の強さ(度)。小さいほど平行に近い
+  amp:     1.0,   // 線だけのときの波の高さ
+  ampMesh: 0.40,  // 面になったときの波の高さ
+  width:   2.0,   // 線の太さ(px)
+  cross:   0.30,  // 縦の線(奥行き方向)の明るさ
+  colStep: 32,    // 縦の線を何点おきに引くか
+  fog:     0.55,  // 奥を暗くする量
+  bias:    0.6,   // 線が面に埋もれないよう手前へ寄せる量(列の間隔 = 1)
+};
+const RANGE = {
+  grow: [-0.01, 1, 0.01], tilt: [0, 80, 1], depth: [0.5, 10, 0.1], fov: [2, 60, 1], amp: [0.1, 2, 0.05],
+  ampMesh: [0.05, 2, 0.05], width: [0.5, 6, 0.1], cross: [0, 1, 0.05], colStep: [4, 200, 4], fog: [0, 1, 0.05],
+  bias: [0, 3, 0.1],
+};
+const LABEL = {
+  grow: '広がり(負=自動)', tilt: '見下ろす角度', depth: '奥行き', fov: '遠近', amp: '高さ(線)', ampMesh: '高さ(面)',
+  width: '線の太さ', cross: '縦線の明るさ', colStep: '縦線の間隔', fog: '奥の暗さ', bias: '線の浮かせ',
+};
+
+// ---------- WebGL ----------
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true });
+const HEAD = `#version 300 es
+precision highp float; precision highp int;
+uniform highp sampler2D uH;
+uniform mat4 uVP;
+uniform float uAspect, uAmp, uDz;
+const int S = ${S}; const int R = ${ROWS};
+vec3 P(int row, int col) {            // row 0 が手前
+  float h = texelFetch(uH, ivec2(col, R - 1 - row), 0).r;
+  return vec3((float(col) / float(S - 1) * 2.0 - 1.0) * uAspect, h * uAmp, -float(row) * uDz);
+}
+`;
+// 面そのもの(色は出さず、奥の線を隠すためだけに描く)
+const VS_SURF = HEAD + `
+void main() {
+  int q = gl_VertexID / 6, c = gl_VertexID % 6;
+  int row = q / (S - 1), col = q % (S - 1);
+  int dr = (c == 2 || c == 3 || c == 5) ? 1 : 0;
+  int dc = (c == 1 || c == 4 || c == 5) ? 1 : 0;
+  gl_Position = uVP * vec4(P(row + dr, col + dc), 1.0);
+}`;
+const FS_SURF = `#version 300 es
+precision highp float; out vec4 o; void main() { o = vec4(0.0, 0.0, 0.0, 1.0); }`;
+// 線。1区間を画面上で太さのある帯にして描く
+const VS_LINE = HEAD + `
+uniform vec2 uRes;
+uniform float uWidth, uRows, uFog, uCross, uBias;
+uniform int uMode, uColStep;
+out vec2 vUV; out float vLen; out float vB;
+float rowB(float r) {
+  float fl = max(1.0, uRows * 0.3);
+  float b = r < 0.5 ? 1.0 : clamp((uRows - r) / fl, 0.0, 1.0);
+  return b * mix(1.0, 1.0 - uFog, clamp(r / float(R - 1), 0.0, 1.0));
+}
+void main() {
+  int i = gl_InstanceID; vec3 a, b; float ba, bb;
+  if (uMode == 0) {
+    int row = i / (S - 1), col = i % (S - 1);
+    a = P(row, col); b = P(row, col + 1); ba = bb = rowB(float(row));
+  } else {
+    int ci = i / (R - 1), row = i % (R - 1);
+    int col = min(ci * uColStep, S - 1);
+    a = P(row, col); b = P(row + 1, col);
+    ba = rowB(float(row)) * uCross; bb = rowB(float(row + 1)) * uCross;
+  }
+  if (ba + bb <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec4 ca = uVP * vec4(a, 1.0), cb = uVP * vec4(b, 1.0);
+  vec2 sa = ca.xy / ca.w * uRes * 0.5, sb = cb.xy / cb.w * uRes * 0.5;
+  vec2 d = sb - sa; float len = length(d);
+  vec2 dir = len > 1e-4 ? d / len : vec2(1.0, 0.0), n = vec2(-dir.y, dir.x);
+  float e = float(gl_VertexID >> 1), s = float(gl_VertexID & 1) * 2.0 - 1.0;
+  float hw = uWidth * 0.5 + 1.0;
+  float u = mix(-hw, len + hw, e);
+  vec2 p = sa + dir * u + n * s * hw;
+  vec4 c = mix(ca, cb, e);
+  gl_Position = vec4(p / (uRes * 0.5), (c.z - uBias) / c.w, 1.0);
+  vUV = vec2(u, s * hw); vLen = len; vB = mix(ba, bb, e);
+}`;
+const FS_LINE = `#version 300 es
+precision highp float;
+in vec2 vUV; in float vLen; in float vB;
+uniform float uWidth; out vec4 o;
+void main() {
+  float dx = max(max(-vUV.x, vUV.x - vLen), 0.0);
+  float a = clamp(uWidth * 0.5 + 0.5 - length(vec2(dx, vUV.y)), 0.0, 1.0) * vB;
+  if (a < 0.004) discard;
+  o = vec4(vec3(a), 1.0);
+}`;
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  for (let i = 0; i < gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i++) {
+    const n = gl.getActiveUniform(p, i).name; u[n] = gl.getUniformLocation(p, n);
+  }
+  return { p, u };
+}
+const surf = program(VS_SURF, FS_SURF), line = program(VS_LINE, FS_LINE);
+const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, S, ROWS);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+// ---------- 行列 ----------
+function perspective(fovy, aspect, n, f) {
+  const t = 1 / Math.tan(fovy / 2);
+  return [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0];
+}
+function lookAt(e, c, up) {
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const nrm = a => { const l = Math.hypot(...a); return [a[0] / l, a[1] / l, a[2] / l]; };
+  const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const z = nrm(sub(e, c)), x = nrm(crs(up, z)), y = crs(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1];
+}
+function mul(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  return o;
+}
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// ---------- 音 ----------
+let mono = null;       // 左右を足した波形。頭に ROWS 列ぶんの無音を足してある
+let frames = 0;        // 曲のコマ数
+let actx = null, abuf = null, src = null, t0 = 0, pos = 0, playing = false;
+
+function growAt(t) {
+  if (P.grow >= 0) return P.grow;
+  if (t <= GROW[0][0]) return GROW[0][1];
+  for (let i = 1; i < GROW.length; i++) {
+    if (t <= GROW[i][0]) {
+      const [ta, ga] = GROW[i - 1], [tb, gb] = GROW[i];
+      return ga + (gb - ga) * smooth(ta, tb, t);
+    }
+  }
+  return GROW[GROW.length - 1][1];
+}
+
+let lastK = -1;
+function draw(t) {
+  const k = Math.min(Math.max(0, Math.floor(t * FPS + 1e-6)), Math.max(0, frames - 1));
+  if (mono && k !== lastK) {     // 面の高さ = 音の波形そのもの。コマが変わったときだけ送る
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, S, ROWS, gl.RED, gl.FLOAT, mono, (k + 1) * S);
+    lastK = k;
+  }
+  const g = growAt(k / FPS);
+  const rows = 1 + g * (ROWS - 1);
+  const nrow = Math.min(ROWS, Math.ceil(rows));
+  const dz = P.depth / (ROWS - 1);
+  const th = P.tilt * Math.PI / 180 * smooth(0, 0.08, g);
+  const fov = P.fov * Math.PI / 180, d = 1 / Math.tan(fov / 2);
+  // 手前の列までの距離を常に d に保つ → 手前の列はいつも画面の幅ちょうど
+  const zc = -0.5 * P.depth * g;
+  const dist = d - zc * Math.cos(th);
+  const eye = [0, dist * Math.sin(th), zc + dist * Math.cos(th)];
+  const vp = mul(perspective(fov, W / H, Math.max(0.1, d - 4), d + P.depth + 6), lookAt(eye, [0, 0, zc], [0, 1, 0]));
+  const amp = P.amp + (P.ampMesh - P.amp) * smooth(0, 0.25, g);
+
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 1); gl.depthMask(true);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+  gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+
+  const common = pr => {
+    gl.useProgram(pr.p);
+    gl.uniform1i(pr.u.uH, 0); gl.uniformMatrix4fv(pr.u.uVP, false, vp);
+    gl.uniform1f(pr.u.uAspect, W / H); gl.uniform1f(pr.u.uAmp, amp); gl.uniform1f(pr.u.uDz, dz);
+  };
+  if (nrow >= 2) {
+    common(surf);
+    gl.disable(gl.BLEND); gl.colorMask(false, false, false, false);
+    gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, (nrow - 1) * (S - 1) * 6);
+    gl.disable(gl.POLYGON_OFFSET_FILL); gl.colorMask(true, true, true, true);
+  }
+  common(line);
+  gl.uniform2f(line.u.uRes, W, H); gl.uniform1f(line.u.uWidth, P.width);
+  gl.uniform1f(line.u.uRows, rows); gl.uniform1f(line.u.uFog, P.fog);
+  gl.uniform1f(line.u.uBias, P.bias * dz * Math.cos(th));
+  gl.enable(gl.BLEND); gl.blendEquation(gl.MAX); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.depthMask(false);
+  gl.uniform1i(line.u.uMode, 0);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nrow * (S - 1));
+  const cross = P.cross * smooth(0.03, 0.35, g);
+  if (cross > 0 && nrow >= 2) {
+    const step = Math.max(1, Math.round(P.colStep));
+    gl.uniform1i(line.u.uMode, 1); gl.uniform1i(line.u.uColStep, step); gl.uniform1f(line.u.uCross, cross);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, (Math.floor((S - 1) / step) + 1) * (ROWS - 1));
+  }
+  return { k, g };
+}
+
+// ---------- 再生と操作 ----------
+const $ = id => document.getElementById(id);
+function now() {
+  if (!playing) return pos;
+  return Math.min(abuf.duration, Math.max(0, actx.currentTime - t0 - (actx.outputLatency || 0)));
+}
+function stop() { if (src) { src.onended = null; try { src.stop(); } catch (e) {} src = null; } playing = false; $('play').textContent = '再生'; }
+async function play(from) {
+  stop(); await actx.resume();
+  pos = Math.min(Math.max(0, from), abuf.duration - 0.01);
+  src = actx.createBufferSource(); src.buffer = abuf; src.connect(actx.destination);
+  src.onended = () => { pos = 0; stop(); };
+  src.start(0, pos); t0 = actx.currentTime - pos; playing = true; $('play').textContent = '停止';
+}
+function label(t, g) {
+  let name = ''; for (const [s, n] of SECTIONS) if (t >= s) name = n;
+  const m = Math.floor(t / 60), s = (t % 60).toFixed(1).padStart(4, '0');
+  $('time').textContent = `${m}:${s}  ${name}  広がり ${g.toFixed(2)}`;
+}
+function tick() {
+  const t = now();
+  const r = draw(t);
+  if (playing) $('seek').value = t;
+  label(t, r.g);
+  requestAnimationFrame(tick);
+}
+$('play').onclick = () => { if (playing) { pos = now(); stop(); } else play(pos); };
+$('seek').oninput = e => { const v = +e.target.value; if (playing) play(v); else pos = v; };
+addEventListener('keydown', e => { if (e.code === 'Space' && e.target.tagName !== 'BUTTON') { e.preventDefault(); $('play').click(); } });
+
+for (const key of Object.keys(P)) {
+  const [min, max, step] = RANGE[key];
+  const lab = document.createElement('label');
+  lab.innerHTML = `<span>${LABEL[key]}</span><input type="range" min="${min}" max="${max}" step="${step}" value="${P[key]}"><span></span>`;
+  const [, inp, out] = lab.children;
+  const show = () => { out.textContent = key === 'grow' && P.grow < 0 ? '自動' : (+P[key]).toFixed(2).replace(/\.?0+$/, ''); };
+  inp.oninput = () => { P[key] = +inp.value; show(); };
+  show(); $('ui').appendChild(lab);
+}
+
+async function load() {
+  actx = new AudioContext({ sampleRate: SR });
+  const res = await fetch(AUDIO);
+  if (!res.ok) throw new Error('音源が読めません: ' + AUDIO);
+  abuf = await actx.decodeAudioData(await res.arrayBuffer());
+  const L = abuf.getChannelData(0), Rr = abuf.numberOfChannels > 1 ? abuf.getChannelData(1) : L;
+  frames = Math.ceil(abuf.length / S);
+  mono = new Float32Array((frames + ROWS + 2) * S);
+  const off = ROWS * S;
+  for (let i = 0; i < abuf.length; i++) mono[off + i] = 0.5 * (L[i] + Rr[i]);
+  $('seek').max = abuf.duration;
+  $('play').disabled = false; $('play').textContent = '再生';
+}
+// 確認用: wm.drawAt(秒) でその時刻の絵を出す
+window.wm = { P, draw, drawAt: t => { pos = t; $('seek').value = t; return draw(t); }, ready: false };
+requestAnimationFrame(tick);
+load().then(() => { wm.ready = true; }).catch(e => { $('msg').textContent = e.message; console.error(e); });
+</script>
+</body>
+</html>

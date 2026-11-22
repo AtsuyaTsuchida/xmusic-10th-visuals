@@ -1,0 +1,25 @@
+# 公開するのはコードと説明書きだけ。音源・動画・ロゴ・脳のデータ・書き出した動画・作業用のファイルは入れない。
+# まず全部を外してから、入れるものだけを指定する。
+/*
+!/.gitignore
+!/README.md
+!/tools/
+!/video/
+/video/*
+!/video/README.md
+!/video/export.sh
+!/video/tools/
+!/video/viz/
+!/video/app/
+/video/app/*
+!/video/app/build.sh
+!/video/app/Sources/
+!/video/player/
+/video/player/*
+!/video/player/README.md
+!/video/player/build.sh
+!/video/player/Sources/
+__pycache__/
+*.pyc
+.DS_Store
+/video/tools/textscan

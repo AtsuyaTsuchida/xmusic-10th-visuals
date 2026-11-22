@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>wave mesh</title>
+<style>
+  html, body { margin: 0; background: #111; color: #bbb; font: 12px/1.5 -apple-system, "Hiragino Sans", sans-serif; }
+  canvas { display: block; width: 100%; aspect-ratio: 32 / 9; background: #000; cursor: grab; }
+  #bar { display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
+  #seek { flex: 1; }
+  #ui { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 4px 24px; padding: 0 12px 12px; }
+  #ui label { display: grid; grid-template-columns: 130px 1fr 40px; gap: 6px; align-items: center; white-space: nowrap; }
+  button { font: inherit; padding: 3px 12px; }
+  #time { font-variant-numeric: tabular-nums; min-width: 260px; }
+  #msg { color: #e88; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="540"></canvas>
+<div id="bar">
+  <button id="play" disabled>読み込み中</button>
+  <input id="seek" type="range" min="0" max="300" step="0.01" value="0">
+  <span id="time"></span>
+  <button id="reset">視点を戻す</button>
+  <span id="msg"></span>
+</div>
+<div id="ui"></div>
+
+<script>
+'use strict';
+// 音の波形を、格子状に並べた頂点(メッシュ)の高さにして点で描く。
+// 仕組みは openFrameworks の ofMesh の例と同じ:
+//     z = sin(i*0.1 + t)*10 + sin(j*0.15 + t)*10   … 横の波 + 奥行きの波
+//     mesh.addVertex(ofVec3f(i - w/2, j - h/2, z));  mesh.drawVertices();
+// の sin を、いま鳴っている音の波形に置き換えたもの。
+//     高さ(i, j) = 横の波 X(i) + 奥行きの波 Y(j)
+//     X(i) = いまの 1/30 秒の波形(最初の「横一本の線」そのもの)
+//     Y(j) = 同じ瞬間から始まる波形を、奥行き方向に並べたもの(時間の幅は別に決められる)
+// 最初は真横から見た中央の1列だけ = 線。曲が進むと前後に列が増え、視点が上がり、
+// 奥行きの波が加わって、面全体が音で波打つ。
+const W = 1920, H = 540, FPS = 30, SR = 48000;
+const S = SR / FPS;          // 横の波の点数 = 1コマぶんの音 (1600)
+const ROWS = 401;            // 奥行きの列数(中央の列が最初の線)
+const JC = (ROWS - 1) / 2;
+const YMAX = 32;             // 奥行き1列あたりの音の点数の上限
+// 音源の版。URL の末尾に ?v=v3 を付けると x-music-collage_v3.wav を読む(既定は v2)
+const AUDIO = '../../x-music-collage_' + ((new URLSearchParams(location.search).get('v') || 'v2').replace(/[^\w]/g, '')) + '.wav';
+
+// 広がり方(秒, 0=線だけ … 1=面いっぱい)。間はなめらかにつなぐ。
+const GROW = [[25.6, 0], [153.6, 1]];
+// カメラの前進(秒, 0=元の位置 … 1=面の中心)。面と同じ高さから真っ直ぐ水平に、面の内部へ進んで止まる。
+// 面が広がりきった 153.6 秒(Break の頭)から進み始め、204.8 秒(Peak の頭)で止まる。
+// 0.31 で面の手前の端を越えて内部に入る。中心までは行かず 0.8 で止める。
+const DOLLY = [[153.6, 0], [204.8, 0.8]];
+const SECTIONS = [[0, 'Drone'], [51.2, 'Stirring'], [102.4, 'Pulse'], [153.6, 'Break'], [179.2, 'Chop'],
+                  [204.8, 'Peak'], [230.4, 'Breakdown'], [243.2, 'Final'], [256, 'Dissolve']];
+
+// 見た目の値(下のスライダーで動かせる)
+const P = {
+  grow:   -0.01,  // 広がり。負なら曲の進行に合わせて自動
+  dolly:  -0.01,  // カメラの前進(0=元の位置, 1=面の中心)。負なら自動
+  turn:    90,    // 面を縦軸まわりに回す角度(度)。線のときは 0 で、広がるにつれてこの角度まで回る
+  turnEnd: 0.6,   // 回りきる広がり
+  spin:    7,     // カメラが面の内部に入ってから、面が水平に回り続ける速さ(度/秒)。7 で約51秒(32小節)に1周
+  tilt:    0,     // 面を見下ろす角度(度)。0 = 面と同じ高さから水平に見る
+  depth:   7.1,   // 面の奥行き(画面の高さの半分 = 1)。7.1 で横幅と同じ = 正方形の面
+  fov:     22,    // 遠近の強さ(度)
+  amp:     1.0,   // 線だけのときの波の高さ
+  ampMesh: 0.30,  // 面になったときの波の高さ
+  ymix:    1.0,   // 奥行きの波の強さ(横の波 = 1)
+  ytime:   6,     // 奥行き1列あたりの音の点数(小さいほど奥行きの波がゆるやか)
+  xs:      4,     // 横は音の何点おきに頂点を置くか
+  size:    2.2,   // 点の大きさ(px)
+  gain:    0.35,  // 面になったときの点の明るさ(水平に見ると点が重なって白く飛ぶので下げる)
+  width:   2.0,   // 最初の線の太さ(px)
+  lineEnd: 0.35,  // 線が消えきる広がり
+  fog:     0.5,   // 奥を暗くする量
+};
+const RANGE = {
+  grow: [-0.01, 1, 0.01], dolly: [-0.01, 1, 0.01], turn: [-180, 180, 1], turnEnd: [0.05, 1, 0.01], spin: [-60, 60, 0.5], tilt: [0, 89, 1], depth: [0.5, 10, 0.1], fov: [4, 70, 1], amp: [0.1, 2, 0.05],
+  ampMesh: [0.05, 2, 0.05], ymix: [0, 2, 0.05], ytime: [1, YMAX, 1], xs: [1, 16, 1], size: [1, 6, 0.1], gain: [0.05, 1, 0.05],
+  width: [0.5, 6, 0.1], lineEnd: [0.02, 1, 0.01], fog: [0, 1, 0.05],
+};
+const LABEL = {
+  grow: '広がり(負=自動)', dolly: 'カメラ前進(負=自動)', turn: '面の回転', turnEnd: '回りきる広がり', spin: '内部での回転(度/秒)', tilt: '見下ろす角度', depth: '奥行き', fov: '遠近', amp: '高さ(線)', ampMesh: '高さ(面)',
+  ymix: '奥行きの波の強さ', ytime: '奥行きの波の細かさ', xs: '頂点の横間隔', size: '点の大きさ', gain: '点の明るさ', width: '線の太さ',
+  lineEnd: '線が消える広がり', fog: '奥の暗さ',
+};
+let color = [1, 1, 1];                           // 点と線の色
+const orbit = { yaw: 0, pitch: 0, zoom: 1 };     // ドラッグで足す視点の回転
+
+// ---------- WebGL ----------
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true });
+const HEAD = `#version 300 es
+precision highp float; precision highp int;
+uniform highp sampler2D uH;      // 0行目 = 横の波 X、1行目 = 奥行きの波 Y
+uniform mat4 uVP;
+uniform float uAspect, uAmp, uDz, uYMix, uTurn;
+const int S = ${S}; const int R = ${ROWS};
+const float JC = ${JC.toFixed(1)};
+vec3 P(int si, int j) {          // si: 横の位置(音の点)、j: 奥行きの列(0 が手前)
+  float h = texelFetch(uH, ivec2(si, 0), 0).r + uYMix * texelFetch(uH, ivec2(j, 1), 0).r;
+  vec3 p = vec3((float(si) / float(S - 1) * 2.0 - 1.0) * uAspect, h * uAmp, (JC - float(j)) * uDz);
+  float c = cos(uTurn), s = sin(uTurn);      // 面を縦軸まわりに回す
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+}
+`;
+// 頂点を点で描く(drawVertices)
+const VS_PT = HEAD + `
+uniform float uHalf, uFade, uFog, uSize, uD0, uD1, uGain;
+uniform int uCols, uXs, uRow0;
+out float vB;
+void main() {
+  int j = uRow0 + gl_VertexID / uCols, i = gl_VertexID % uCols;
+  int si = min(i * uXs, S - 1);
+  float dj = abs(float(j) - JC);
+  float b = clamp((uHalf - dj) / uFade, 0.0, 1.0);
+  if (b <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 1.0; vB = 0.0; return; }
+  gl_Position = uVP * vec4(P(si, j), 1.0);
+  b *= mix(1.0, 1.0 - uFog, clamp((gl_Position.w - uD0) / (uD1 - uD0), 0.0, 1.0));
+  gl_PointSize = uSize + 1.5; vB = b * uGain;
+}`;
+const FS_PT = `#version 300 es
+precision highp float;
+in float vB; uniform float uSize; uniform vec3 uColor; out vec4 o;
+void main() {
+  float d = length(gl_PointCoord - 0.5) * (uSize + 1.5);
+  float a = clamp(uSize * 0.5 + 0.5 - d, 0.0, 1.0) * vB;
+  if (a < 0.004) discard;
+  o = vec4(uColor * a, 1.0);
+}`;
+// 中央の列をつないだ線(最初の横一本の波形)
+const VS_LINE = HEAD + `
+uniform vec2 uRes;
+uniform float uWidth;
+out vec2 vUV; out float vLen;
+void main() {
+  int col = gl_InstanceID, j = int(JC);
+  vec4 ca = uVP * vec4(P(col, j), 1.0), cb = uVP * vec4(P(col + 1, j), 1.0);
+  vec2 sa = ca.xy / ca.w * uRes * 0.5, sb = cb.xy / cb.w * uRes * 0.5;
+  vec2 d = sb - sa; float len = length(d);
+  vec2 dir = len > 1e-4 ? d / len : vec2(1.0, 0.0), n = vec2(-dir.y, dir.x);
+  float e = float(gl_VertexID >> 1), s = float(gl_VertexID & 1) * 2.0 - 1.0;
+  float hw = uWidth * 0.5 + 1.0;
+  float u = mix(-hw, len + hw, e);
+  gl_Position = vec4((sa + dir * u + n * s * hw) / (uRes * 0.5), 0.0, 1.0);
+  vUV = vec2(u, s * hw); vLen = len;
+}`;
+const FS_LINE = `#version 300 es
+precision highp float;
+in vec2 vUV; in float vLen;
+uniform float uWidth, uB; uniform vec3 uColor; out vec4 o;
+void main() {
+  float dx = max(max(-vUV.x, vUV.x - vLen), 0.0);
+  float a = clamp(uWidth * 0.5 + 0.5 - length(vec2(dx, vUV.y)), 0.0, 1.0) * uB;
+  if (a < 0.004) discard;
+  o = vec4(uColor * a, 1.0);
+}`;
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  for (let i = 0; i < gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i++) {
+    const n = gl.getActiveUniform(p, i).name; u[n] = gl.getUniformLocation(p, n);
+  }
+  return { p, u };
+}
+const pts = program(VS_PT, FS_PT), line = program(VS_LINE, FS_LINE);
+const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, S, 2);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+// ---------- 行列 ----------
+function perspective(fovy, aspect, n, f) {
+  const t = 1 / Math.tan(fovy / 2);
+  return [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0];
+}
+function lookAt(e, c, up) {
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const nrm = a => { const l = Math.hypot(...a); return [a[0] / l, a[1] / l, a[2] / l]; };
+  const crs = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const z = nrm(sub(e, c)), x = nrm(crs(up, z)), y = crs(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1];
+}
+function mul(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  return o;
+}
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+
+// ---------- 音 ----------
+let mono = null;       // 左右を足した波形(後ろに余白つき)
+let frames = 0;        // 曲のコマ数
+const ybuf = new Float32Array(S);
+let actx = null, abuf = null, src = null, t0 = 0, pos = 0, playing = false;
+
+function curve(keys, t) {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) {
+    if (t <= keys[i][0]) {
+      const [ta, ga] = keys[i - 1], [tb, gb] = keys[i];
+      return ga + (gb - ga) * smooth(ta, tb, t);
+    }
+  }
+  return keys[keys.length - 1][1];
+}
+const growAt = t => P.grow >= 0 ? P.grow : curve(GROW, t);
+const dollyAt = t => P.dolly >= 0 ? P.dolly : curve(DOLLY, t);
+// カメラが面の手前の端を越える時刻(自動の前進での値)。ここから面が回り始める
+let enterKey = null, enterT = Infinity;
+function enterTime(dist) {
+  if (enterKey === dist) return enterT;
+  const edge = 1 - (W / H) / dist, ta = DOLLY[0][0], tb = DOLLY[DOLLY.length - 1][0];
+  enterKey = dist; enterT = Infinity;
+  for (let t = ta; t <= tb; t += 1 / FPS) if (curve(DOLLY, t) >= edge) { enterT = t; break; }
+  return enterT;
+}
+// 回転の角度(度)。止まった状態から SPIN_EASE 秒かけてなめらかに一定の速さになる
+const SPIN_EASE = 3.2;
+function spinAt(t, dist) {
+  const u = t - enterTime(dist);
+  if (!(u > 0)) return 0;
+  const x = Math.min(1, u / SPIN_EASE);
+  return P.spin * (SPIN_EASE * (x * x * x - x * x * x * x / 2) + Math.max(0, u - SPIN_EASE));
+}
+
+let lastKey = '';
+function draw(t) {
+  const k = Math.min(Math.max(0, Math.floor(t * FPS + 1e-6)), Math.max(0, frames - 1));
+  const sy = Math.max(1, Math.min(YMAX, Math.round(P.ytime)));
+  if (mono && lastKey !== k + ':' + sy) {
+    // 横の波 X = このコマの音そのもの。奥行きの波 Y = 同じ位置から sy 点ずつの平均を列の数だけ
+    const base = k * S;
+    for (let j = 0; j < ROWS; j++) {
+      let s = 0; const a = base + j * sy;
+      for (let n = 0; n < sy; n++) s += mono[a + n];
+      ybuf[j] = s / sy;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, S, 1, gl.RED, gl.FLOAT, mono, base);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 1, S, 1, gl.RED, gl.FLOAT, ybuf);
+    lastKey = k + ':' + sy;
+  }
+  const g = growAt(k / FPS);
+  const half = 1 + g * JC;                           // 中央から前後に見せる列数
+  const dz = P.depth / (ROWS - 1);
+  const pitch = Math.max(-1.55, Math.min(1.55, P.tilt * Math.PI / 180 * smooth(0, 0.08, g) + orbit.pitch));
+  const fov = P.fov * Math.PI / 180;
+  const dist = orbit.zoom / Math.tan(fov / 2);       // 中央の列が画面の幅ちょうどになる距離
+  const eye0 = [dist * Math.sin(orbit.yaw) * Math.cos(pitch), dist * Math.sin(pitch), dist * Math.cos(orbit.yaw) * Math.cos(pitch)];
+  // 前進: 高さはそのまま、水平に面の中心へ。向きは変えないので注視点も同じだけ動かす
+  const dl = dollyAt(k / FPS);
+  const eye = [eye0[0] * (1 - dl), eye0[1], eye0[2] * (1 - dl)];
+  const look = [eye[0] - eye0[0], 0, eye[2] - eye0[2]];
+  const dcen = dist - dl * dist * Math.cos(pitch) * Math.cos(pitch);   // 視線方向に測った中心までの距離
+  const vp = mul(perspective(fov, W / H, Math.max(0.05, dist - Math.max(P.depth, 2 * W / H) - 3), dist + Math.max(P.depth, 2 * W / H) + 6), lookAt(eye, look, [0, 1, 0]));
+  const amp = P.amp + (P.ampMesh - P.amp) * smooth(0, 0.3, g);
+  const ymix = P.ymix * smooth(0, 0.3, g);
+  const turn = (P.turn * smooth(0.02, P.turnEnd, g) + spinAt(k / FPS, dist)) * Math.PI / 180;
+  const xs = Math.max(1, Math.round(P.xs)), cols = Math.ceil(S / xs);
+
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.disable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+  const common = pr => {
+    gl.useProgram(pr.p);
+    gl.uniform1i(pr.u.uH, 0); gl.uniformMatrix4fv(pr.u.uVP, false, vp);
+    gl.uniform1f(pr.u.uAspect, W / H); gl.uniform1f(pr.u.uAmp, amp); gl.uniform1f(pr.u.uDz, dz);
+    gl.uniform1f(pr.u.uYMix, ymix); gl.uniform1f(pr.u.uTurn, turn); gl.uniform3fv(pr.u.uColor, color);
+  };
+  // 頂点(点)
+  const row0 = Math.max(0, Math.floor(JC - half)), row1 = Math.min(ROWS - 1, Math.ceil(JC + half));
+  common(pts);
+  // 広がっている間は端をぼかし、広がりきったらぼかさない(面が端まで同じ明るさの正方形になる)
+  gl.uniform1f(pts.u.uFade, Math.max(1, half * 0.15 * (1 - smooth(0.6, 1, g))));
+  gl.uniform1f(pts.u.uHalf, half); gl.uniform1f(pts.u.uFog, P.fog * smooth(0, 0.3, g)); gl.uniform1f(pts.u.uSize, P.size); gl.uniform1f(pts.u.uGain, 1 + (P.gain - 1) * smooth(0, 0.3, g));
+  { const r = Math.max(P.depth * 0.5, W / H) * 0.8; gl.uniform1f(pts.u.uD0, dcen - r); gl.uniform1f(pts.u.uD1, dcen + r); }
+  gl.uniform1i(pts.u.uCols, cols); gl.uniform1i(pts.u.uXs, xs); gl.uniform1i(pts.u.uRow0, row0);
+  gl.drawArrays(gl.POINTS, 0, (row1 - row0 + 1) * cols);
+  // 中央の列の線(広がるにつれて消える)
+  const lb = 1 - smooth(0.02, P.lineEnd, g);
+  if (lb > 0) {
+    common(line);
+    gl.uniform2f(line.u.uRes, W, H); gl.uniform1f(line.u.uWidth, P.width); gl.uniform1f(line.u.uB, lb);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, S - 1);
+  }
+  return { k, g, dl };
+}
+
+// ---------- 再生と操作 ----------
+const $ = id => document.getElementById(id);
+function now() {
+  if (!playing) return pos;
+  return Math.min(abuf.duration, Math.max(0, actx.currentTime - t0 - (actx.outputLatency || 0)));
+}
+function stop() { if (src) { src.onended = null; try { src.stop(); } catch (e) {} src = null; } playing = false; $('play').textContent = '再生'; }
+async function play(from) {
+  stop(); await actx.resume();
+  pos = Math.min(Math.max(0, from), abuf.duration - 0.01);
+  src = actx.createBufferSource(); src.buffer = abuf; src.connect(actx.destination);
+  src.onended = () => { pos = 0; stop(); };
+  src.start(0, pos); t0 = actx.currentTime - pos; playing = true; $('play').textContent = '停止';
+}
+function label(t, g, dl) {
+  let name = ''; for (const [s, n] of SECTIONS) if (t >= s) name = n;
+  const m = Math.floor(t / 60), s = (t % 60).toFixed(1).padStart(4, '0');
+  $('time').textContent = `${m}:${s}  ${name}  広がり ${g.toFixed(2)}  前進 ${dl.toFixed(2)}`;
+}
+function tick() {
+  const t = now();
+  const r = draw(t);
+  if (playing) $('seek').value = t;
+  label(t, r.g, r.dl);
+  requestAnimationFrame(tick);
+}
+$('play').onclick = () => { if (playing) { pos = now(); stop(); } else play(pos); };
+$('seek').oninput = e => { const v = +e.target.value; if (playing) play(v); else pos = v; };
+addEventListener('keydown', e => { if (e.code === 'Space' && e.target.tagName !== 'BUTTON') { e.preventDefault(); $('play').click(); } });
+
+// 視点: ドラッグで回す、ホイールで寄る、ダブルクリックかボタンで戻す(ofEasyCam と同じ操作)
+const resetView = () => { orbit.yaw = 0; orbit.pitch = 0; orbit.zoom = 1; };
+let drag = null;
+canvas.onpointerdown = e => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); };
+canvas.onpointermove = e => {
+  if (!drag) return;
+  orbit.yaw -= (e.clientX - drag[0]) * 0.005; orbit.pitch += (e.clientY - drag[1]) * 0.005;
+  drag = [e.clientX, e.clientY];
+};
+canvas.onpointerup = () => { drag = null; };
+canvas.onwheel = e => { e.preventDefault(); orbit.zoom = Math.min(4, Math.max(0.2, orbit.zoom * Math.exp(e.deltaY * 0.001))); };
+canvas.ondblclick = resetView; $('reset').onclick = resetView;
+
+for (const key of Object.keys(P)) {
+  const [min, max, step] = RANGE[key];
+  const lab = document.createElement('label');
+  lab.innerHTML = `<span>${LABEL[key]}</span><input type="range" min="${min}" max="${max}" step="${step}" value="${P[key]}"><span></span>`;
+  const [, inp, out] = lab.children;
+  const show = () => { out.textContent = (key === 'grow' || key === 'dolly') && P[key] < 0 ? '自動' : (+P[key]).toFixed(2).replace(/\.?0+$/, ''); };
+  inp.oninput = () => { P[key] = +inp.value; show(); };
+  show(); $('ui').appendChild(lab);
+}
+{
+  const lab = document.createElement('label');
+  lab.innerHTML = '<span>色</span><input type="color" value="#ffffff"><span></span>';
+  lab.children[1].oninput = e => { const v = e.target.value; color = [1, 3, 5].map(i => parseInt(v.slice(i, i + 2), 16) / 255); };
+  $('ui').appendChild(lab);
+}
+
+async function load() {
+  actx = new AudioContext({ sampleRate: SR });
+  const res = await fetch(AUDIO);
+  if (!res.ok) throw new Error('音源が読めません: ' + AUDIO);
+  abuf = await actx.decodeAudioData(await res.arrayBuffer());
+  const L = abuf.getChannelData(0), Rr = abuf.numberOfChannels > 1 ? abuf.getChannelData(1) : L;
+  frames = Math.ceil(abuf.length / S);
+  mono = new Float32Array((frames + 1) * S + ROWS * YMAX);
+  for (let i = 0; i < abuf.length; i++) mono[i] = 0.5 * (L[i] + Rr[i]);
+  $('seek').max = abuf.duration;
+  $('play').disabled = false; $('play').textContent = '再生';
+}
+// 確認用: wm.drawAt(秒) でその時刻の絵を出す
+window.wm = { P, orbit, draw, drawAt: t => { pos = t; $('seek').value = t; return draw(t); }, ready: false };
+requestAnimationFrame(tick);
+load().then(() => { wm.ready = true; }).catch(e => { $('msg').textContent = e.message; console.error(e); });
+</script>
+</body>
+</html>
