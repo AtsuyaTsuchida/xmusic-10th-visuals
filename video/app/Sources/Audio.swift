@@ -195,14 +195,16 @@ final class Player {
     private var attached = false
     private(set) var playing = false
     var pos = 0.0               // 止まっているときの位置(秒)
-    var muted = false { didSet { engine.mainMixerNode.outputVolume = muted ? 0 : 1 } }
+    var muted = false { didSet { engine.mainMixerNode.outputVolume = muted ? 0 : gain } }
+    /// 音量(最後のフェードアウト用。1 = そのまま)
+    var gain: Float = 1 { didSet { if gain != oldValue { engine.mainMixerNode.outputVolume = muted ? 0 : gain } } }
     var duration: Double { track?.duration ?? 0 }
 
     func load(_ t: Track) {
         node.stop(); playing = false; pos = 0
         if attached { engine.disconnectNodeOutput(node) } else { engine.attach(node); attached = true }
         engine.connect(node, to: engine.mainMixerNode, format: t.file.processingFormat)
-        engine.mainMixerNode.outputVolume = muted ? 0 : 1
+        engine.mainMixerNode.outputVolume = muted ? 0 : gain
         track = t
     }
 

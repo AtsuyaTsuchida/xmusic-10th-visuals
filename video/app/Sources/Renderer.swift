@@ -46,6 +46,8 @@ struct RDUniforms {
 struct PostUniforms {
     var a = SIMD4<Float>()      // 読む側の1画素の大きさ x, y(ぼかしでは進む向きを掛けたもの), 明るさの下限, 0
     var b = SIMD4<Float>()      // ブルームの量, 反転の量, 0, 0
+    var c = SIMD4<Float>()      // 画素の引き伸ばし: 上の境目 y, 下の境目 y(0 = 上の端, 1 = 下の端), 掛ける量, 0
+    var d = SIMD4<Float>()      // 画素の引き伸ばし(左右): 左の境目 x, 右の境目 x, 掛ける量, 0
 }
 
 struct FrameInfo { var k = 0; var g = 0.0; var dl = 0.0; var note = ""; var depth = 0.0; var shake = SIMD3<Double>(); var bloom = 0.0; var flash = 0.0; var morph = 0.0 }
@@ -323,7 +325,7 @@ fragment float4 title_fs(BlitOut in [[stage_in]], texture2d<float> t [[texture(0
 }
 
 // ---- 仕上げ: ブルーム(明るい所のにじみ)と、色の反転 ----
-struct PU { float4 a; float4 b; };
+struct PU { float4 a; float4 b; float4 c; float4 d; };
 // 明るい所だけを取り出しながら 1/4 に縮める(4回の読みで 4x4 画素の平均)
 fragment float4 bright_fs(BlitOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant PU &p [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
@@ -355,12 +357,16 @@ fragment float4 blur_fs(BlitOut in [[stage_in]], texture2d<float> t [[texture(0)
 fragment float4 post_fs(BlitOut in [[stage_in]], texture2d<float> scene [[texture(0)]], texture2d<float> b0 [[texture(1)]],
                         texture2d<float> b1 [[texture(2)]], texture2d<float> b2 [[texture(3)]], constant PU &p [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float3 c = scene.sample(s, in.uv).rgb;
+    // 画素の引き伸ばし: 境目より上は境目の画素を上へ、境目より下は境目の画素を下へ、まっすぐ引き伸ばす
+    float2 suv = in.uv;
+    if (p.c.z > 0.5) suv.y = clamp(suv.y, p.c.x, p.c.y);
+    if (p.d.z > 0.5) suv.x = clamp(suv.x, p.d.x, p.d.y);        // 左右も同じ: 境目より外は、境目の画素を横へ引き伸ばす
+    float3 c = scene.sample(s, suv).rgb;
     // 背景の色(ふだんは黒)。絵の暗い所ほど背景が見える
     float3 bg = float3(p.a.w, p.b.z, p.b.w);
     c = mix(bg, c, saturate(max(c.r, max(c.g, c.b)) * 2.5));
     if (p.b.x > 0.0005) {
-        float3 g = 0.40 * b0.sample(s, in.uv).rgb + 0.35 * b1.sample(s, in.uv).rgb + 0.25 * b2.sample(s, in.uv).rgb;
+        float3 g = 0.40 * b0.sample(s, suv).rgb + 0.35 * b1.sample(s, suv).rgb + 0.25 * b2.sample(s, suv).rgb;
         c += p.b.x * g;
         c += (hash21(in.pos.xy) - 0.5) / 255.0;          // にじみのなだらかな所に縞が出ないようにする
     }
@@ -550,6 +556,7 @@ final class Renderer {
     private var reelTried = false
     private var odakyu: VideoSource?    // x-Music のロゴのうしろに流す動画
     private var odakyuTried = false
+    var endFade = 0.0                   // 最後のフェードアウトの進み具合(0 = まだ, 1 = 消えきった)。音量に使う
     private var stamp: DateStamp?       // 終盤に重ねる日付の文字
     private var cycle: VideoSource?     // 金物が入る所から流す、キックごとに素材を順番に回す動画
     private var cycleTried = false
@@ -667,6 +674,7 @@ final class Renderer {
         var seqVideo = false
         // 日付のカウント: 終盤のキックのパートの頭から終わりまでを 0..1 に直したもの。終わったあとは 1 のまま(黒地に日付だけ)
         var dateOn = false, dateOnly = false, dateX = 0.0, dateEnd = Double.infinity
+        endFade = 0
         if seqMode, P.seqDate >= 0.5, let lastClap = track.cueClap.last?.t, let lastKick = track.cueKick.last?.t,
            let firstKick = track.cueKick.first(where: { $0.t > lastClap + 0.05 })?.t {
             let d0 = floor(firstKick * Double(FPS) + 1e-6) / Double(FPS), d1 = lastKick + P.seqVideoHold
@@ -1124,7 +1132,42 @@ final class Renderer {
         // 波形が赤くなっている間(ハイハットが鳴っている最中)だけ、背景を青にする
         let waveNow = (!videoMode && !brainMode && !typoMode) || (seqMode && !seqBrain)
         let hatBg = (waveNow && P.hatRed >= 0.5 && P.hatBlue > 0.001) ? track.hatColor(tp, len: P.bScanDur)?.bg : nil
-        post(cb, bloom: bloomAmt, flash: flashAmt, bg: hatBg.map { $0 * Float(P.hatBlue * reveal) } ?? SIMD3<Float>(0, 0, 0))
+        // キックとクラップの区間(脳のシーン): クラップが鳴った瞬間、画面の真ん中の細い帯を残して、その上下の画素を端まで引き伸ばす。
+        // 帯はすぐに上下へ広がって、bStretchDur 秒で元の絵に戻る。帯の最初の細さは回ごとに変わる
+        var stretch = SIMD3<Float>(0, 1, 0)
+        if brainMode, P.bStretch >= 0.5, tk + 1 / Double(FPS) > P.bDissolveFrom, tk < P.bDissolveTo, !(seqMode && !seqBrain) {
+            var lo = 0, hi = track.cueClap.count
+            let frameEnd = Double(k + 1) / Double(FPS)
+            while lo < hi { let m = (lo + hi) / 2; if track.cueClap[m].t < frameEnd { lo = m + 1 } else { hi = m } }
+            if lo > 0, track.cueClap[lo - 1].t >= P.bDissolveFrom - 0.05 {
+                let c0 = floor(track.cueClap[lo - 1].t * Double(FPS) + 1e-6) / Double(FPS)
+                let x = ((still ? tk : t) - c0) / max(0.03, P.bStretchDur)
+                if x >= 0, x < 1 {
+                    var r = SplitMix(s: UInt64(truncatingIfNeeded: lo &* 7717 &+ 3))
+                    let h0 = 0.02 + 0.16 * r.next(), cy = 0.5 + (r.next() - 0.5) * 0.12      // 帯の最初の半分の高さと、中心の位置
+                    let half = h0 + (0.62 - h0) * x * x                                      // はじめゆっくり、あとは速く広がる
+                    stretch = SIMD3(Float(max(0, cy - half)), Float(min(1, cy + half)), 1)
+                }
+            }
+        }
+        // ハイハットのスキャンの区間のキック: 画面の真ん中の縦の帯を残して、その左右の画素を端まで引き伸ばす(脳の左右に、横の筋が走る)
+        var stretchX = SIMD3<Float>(0, 1, 0)
+        if brainMode, P.bStretchKick >= 0.5, tk + 1 / Double(FPS) > P.bStretchKickFrom, tk < P.bStretchKickTo, !(seqMode && !seqBrain) {
+            var lo = 0, hi = track.cueKick.count
+            let frameEnd = Double(k + 1) / Double(FPS)
+            while lo < hi { let m = (lo + hi) / 2; if track.cueKick[m].t < frameEnd { lo = m + 1 } else { hi = m } }
+            if lo > 0, track.cueKick[lo - 1].t >= P.bStretchKickFrom - 0.05 {
+                let c0 = floor(track.cueKick[lo - 1].t * Double(FPS) + 1e-6) / Double(FPS)
+                let x = ((still ? tk : t) - c0) / max(0.03, P.bStretchKickDur)
+                if x >= 0, x < 1 {
+                    var r = SplitMix(s: UInt64(truncatingIfNeeded: lo &* 9151 &+ 11))
+                    let w0 = 0.01 + 0.07 * r.next(), cx = 0.5 + (r.next() - 0.5) * 0.08      // 帯の最初の半分の幅(画面は横長なので、縦より細く)と、中心の位置
+                    let half = w0 + (0.60 - w0) * x * x
+                    stretchX = SIMD3(Float(max(0, cx - half)), Float(min(1, cx + half)), 1)
+                }
+            }
+        }
+        post(cb, bloom: bloomAmt, flash: flashAmt, bg: hatBg.map { $0 * Float(P.hatBlue * reveal) } ?? SIMD3<Float>(0, 0, 0), stretch: stretch, stretchX: stretchX)
         // 終盤のキックのパート: 画面の中央に、細い文字の日付を重ねる。パートの頭で 2016/04/01、終わりで 2026/11/22 になるよう、一定の速さで数える。
         // パートが終わったあとは、黒地にその日付だけを残す
         if dateOn {
@@ -1136,6 +1179,7 @@ final class Renderer {
                 // 今日の日付が出てから dateGlowAfter 秒たったら、日付が消えていき、かわりに中央のぼやけた淡い光が浮かぶ(ディゾルブ)
                 let gx = smooth(dateEnd + P.dateGlowAfter, dateEnd + P.dateGlowAfter + max(0.1, P.dateGlowLen), still ? tk : t)
                 var dk = SIMD4<Float>(Float(1 - gx), Float(gx * P.dateGlow), Float(Double(W) / Double(H)), 0)
+                endFade = gx                               // 音も同じ割合で下げる(再生側が読む)
                 oe.setRenderPipelineState(datePipe)
                 oe.setFragmentBytes(&dk, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 oe.setFragmentTexture(st.texture(progress: dateX), index: 0)
@@ -1161,7 +1205,7 @@ final class Renderer {
     }
 
     /// scene にブルームと反転を掛けて target に描く
-    private func post(_ cb: MTLCommandBuffer, bloom: Double, flash: Double, bg: SIMD3<Float>) {
+    private func post(_ cb: MTLCommandBuffer, bloom: Double, flash: Double, bg: SIMD3<Float>, stretch: SIMD3<Float> = SIMD3(0, 1, 0), stretchX: SIMD3<Float> = SIMD3(0, 1, 0)) {
         let P = params
         func pass(_ pipe: MTLRenderPipelineState, to dst: MTLTexture, from src: [MTLTexture], _ pu: PostUniforms) {
             let rp = MTLRenderPassDescriptor()
@@ -1193,7 +1237,7 @@ final class Renderer {
             }
         }
         pass(postPipe, to: target, from: [scene, glow[0][0], glow[1][0], glow[2][0]],
-             PostUniforms(a: SIMD4(0, 0, 0, bg.x), b: SIMD4(Float(bloom), Float(flash), bg.y, bg.z)))
+             PostUniforms(a: SIMD4(0, 0, 0, bg.x), b: SIMD4(Float(bloom), Float(flash), bg.y, bg.z), c: SIMD4(stretch.x, stretch.y, stretch.z, 0), d: SIMD4(stretchX.x, stretchX.y, stretchX.z, 0)))
     }
 
     /// タイトルの文字を、描く先と同じ大きさの白黒の絵にする(文字や大きさが変わったときだけ作り直す)

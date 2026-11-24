@@ -215,6 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate, NSWin
         // 絵を描くのは主になる画面(出力中は外部、ふだんは窓)のときだけ。もう一方は同じ絵を写すだけ
         let master = v === (outView ?? view)
         let info = master ? r.encode(cb, time: t, playing: player.playing) : lastInfo
+        player.gain = Float(1 - r.endFade)                 // 最後は、映像と一緒に音も消えていく
         r.blit(cb, to: pass, drawableSize: v.drawableSize)
         cb.addCompletedHandler { [inflight] _ in inflight.signal() }
         cb.present(drawable)

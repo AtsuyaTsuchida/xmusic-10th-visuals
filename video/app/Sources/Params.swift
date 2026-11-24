@@ -132,9 +132,9 @@ final class Params {
     var logoScale = 0.7   // ロゴ(アイコンと名前、x-Music のロゴ)の大きさ。1 = 最初の大きさ
     var typoSimDim = 0.5  // ロゴのうしろのシミュレーションの明るさ(1 = そのまま。ロゴが読めるように下げてある)
     var seqDate = 1.0     // 終盤のキックのパートで、中央に日付(2016/04/01 → 2026/11/22)を数えて出す。終わったあとは黒地に日付だけ(0 = 出さない)
-    var dateGlowAfter = 5.0 // 今日の日付が出てから、光へ移り始めるまでの秒数
-    var dateGlowLen = 4.0  // 日付が消えて光が浮かぶのにかける秒数
-    var dateGlow = 0.26   // 光の明るさ(中心)
+    var dateGlowAfter = 5.0 // 今日の日付が出てから、フェードアウトが始まるまでの秒数
+    var dateGlowLen = 5.0  // 映像(日付)と音が消えきるまでの秒数
+    var dateGlow = 0.0    // フェードのあとに浮かべる、中央のぼやけた光の明るさ(0 = 出さない。いまは使わない)
     var seqBurst = 1.4    // 通しで切り替わった瞬間に、波形の粒が弾け飛ぶ速さ
     var bMorph = -0.01    // 脳になる量(0 = 漂うだけ, 1 = 全部の粒子が脳)。負なら自動(下の時刻で進む)
     var bStart = 90.0     // 自動のとき、脳へ集まり始める時刻(秒)
@@ -154,9 +154,17 @@ final class Params {
     var bCloud = 0.09    // 漂う粒子の明るさ
     var bBrain = 0.21     // 脳の粒子の明るさ
     var bDots = 0.10      // 脳に着いた粒子のうち、描く割合(小さいほど粒がまばらで、1 粒ずつ見える。1 = 全部描く)
+    // 面で描く脳(3DCG らしい描画): スキャンの入る区間だけ、脳を粒子でなく陰影のついた面で描き、音に合わせて膨らませる
+    var bSolidCG = 0.0    // 面で描く区間を入れる(0 = 入れない。粒子のまま)。いまは使わない(粒子に戻した)
+    var bSolidFrom = 121.6 // 始まる時刻(秒)。v9 では、ハイハット(スキャン)が終わって、キックとクラップだけになる所
+    var bSolidTo = 134.4  // 終わる時刻(秒)。v9 では、ドラマーのモデルへ移る所
+    var bSwell = 0.10     // キックで膨らむ量(画面の高さの半分 = 1)
+    var bSwellHat = 0.05  // クラップ(とハイハット)で膨らむ量
+    var bSwellDecay = 0.14 // 膨らみが引く速さ(秒)
+    var bSwellBump = 0.012 // 膨らむときの、場所ごとの細かい凸凹の量
     var bSolid = 0.0      // 1 = うしろの粒を隠して、面のある立体として見せる。0 = 隠さない(透けて見える粒の集まり)
     var bExposure = 1.0   // 全体の明るさ
-    var bGrid = 0.22      // マス目の面(xy, yz, zx の 3 枚)の線の明るさ(0 = 出さない)
+    var bGrid = 0.30      // マス目の面(xy, yz, zx の 3 枚)の線の明るさ(0 = 出さない)
     var bGridSize = 1.5   // マス目の面の 1 辺(粒子が漂う範囲のいちばん長い辺を 1 として)
     var bAxis = 0.12      // 原点の赤い線の長さ(原点から片側。画面の高さの半分 = 1。0 = 出さない)
     var bAxisBright = 1.0 // 赤い線の濃さ(0..1)
@@ -193,11 +201,20 @@ final class Params {
     var bHatCam = 1.0     // ハイハットの間は客観視のカメラにする(0 = しない)
     var bHatCamYaw = 35.0  // 客観視のカメラの向き(度)。毎回同じ場所
     var bHatCamPitch = 22.0 // 客観視のカメラの高さ(度)
-    var bHatCamZoom = 1.7 // 客観視のときの距離(標準を 1 として)
+    var bHatCamZoom = 1.2 // 客観視のときの距離(標準を 1 として)
     var bScanSide = 1.0   // スキャン中に両脇へ出す CT の連番の濃さ(0 = 出さない)
     // 脳がほどける(脳のシーン): できあがった脳が、また Curl noise の雲に戻る。そのあと、もう一度集まる
-    var bDissolveFrom = 121.6 // ほどけ始める時刻(秒)。v9 では、ハイハットが終わってクラップだけになる所
-    var bDissolveTo = 134.4   // ほどけきる時刻(秒)。v9 では、金物のついたハイハットが入る所
+    var bDissolveFrom = 121.6 // ほどけ始める時刻(秒)。v9 では、ハイハット(スキャン)が終わって、キックとクラップだけになる所
+    var bDissolveTo = 134.4   // ほどけきる時刻(秒)。v9 では、ドラマーのモデルへ移る所
+    // キックとクラップの区間(bDissolveFrom〜bDissolveTo): 粒子に色をつけ、クラップのたびに、脳の上下へ画素を引き伸ばす
+    var bTint = 1.0       // この区間で粒子に色をつける量(0 = 白のまま)
+    var bStretch = 1.0    // クラップで画素を上下へ引き伸ばす(0 = しない)
+    var bStretchKick = 1.0 // ハイハットのスキャンの区間で、キックで画素を左右へ引き伸ばす(0 = しない)
+    var bStretchKickFrom = 109.6 // その区間の始まり(秒)。v9 では、脳ができてハイハットが入る所
+    var bStretchKickTo = 121.6   // 終わり(秒)。v9 では、キックとクラップだけになる所
+    var bStretchKickDur = 0.10 // キックの左右の引き伸ばしが引くまでの秒数(3 コマ)
+    var bWhite = 1.7      // 脳のシーンの白い粒子の濃さ(明るさの倍率。1 = 以前のまま)
+    var bStretchDur = 0.22 // 引き伸ばしが引くまでの秒数
     var bReformFrom = 297.1   // もう一度脳に集まり始める時刻(秒)。v9 では、タイポグラフィのパートが終わる所
     var bReformLen = 8.0      // 集まりきるまでの秒数
     // ドラマーのモデル(脳のシーン): 粒子を、藤井さんの論文の式(6)(両手の相対位相のモデル)で動かして、ポテンシャルの地形に並べる。数式を上に重ねる
@@ -320,8 +337,8 @@ let PARAMS: [ParamInfo] = [
     ParamInfo(key: "logoScale", label: "ロゴの大きさ", min: 0.2, max: 1.2, step: 0.01, path: \.logoScale, group: "common"),
     ParamInfo(key: "typoSimDim", label: "ロゴの背景の明るさ", min: 0, max: 1, step: 0.01, path: \.typoSimDim, group: "common"),
     ParamInfo(key: "seqDate", label: "通し: 終盤に日付", min: 0, max: 1, step: 1, path: \.seqDate, group: "common"),
-    ParamInfo(key: "dateGlowAfter", label: "日付のあと光まで(秒)", min: 0, max: 60, step: 0.5, path: \.dateGlowAfter, group: "common"),
-    ParamInfo(key: "dateGlowLen", label: "光へ移る長さ(秒)", min: 0.1, max: 30, step: 0.1, path: \.dateGlowLen, group: "common"),
+    ParamInfo(key: "dateGlowAfter", label: "日付のあとフェードまで(秒)", min: 0, max: 60, step: 0.5, path: \.dateGlowAfter, group: "common"),
+    ParamInfo(key: "dateGlowLen", label: "フェードアウトの長さ(秒)", min: 0.1, max: 30, step: 0.1, path: \.dateGlowLen, group: "common"),
     ParamInfo(key: "dateGlow", label: "最後の光の明るさ", min: 0, max: 1, step: 0.01, path: \.dateGlow, group: "common"),
     ParamInfo(key: "seqBurst", label: "通し: 弾け飛ぶ速さ", min: 0, max: 8, step: 0.05, path: \.seqBurst, group: "common"),
     ParamInfo(key: "bMorph", label: "脳になる量(負=自動)", min: -0.01, max: 1, step: 0.01, path: \.bMorph, group: "brain"),
@@ -341,6 +358,12 @@ let PARAMS: [ParamInfo] = [
     ParamInfo(key: "bSize", label: "粒子の大きさ", min: 0.5, max: 6, step: 0.05, path: \.bSize, group: "brain"),
     ParamInfo(key: "bCloud", label: "漂う粒子の明るさ", min: 0, max: 0.5, step: 0.005, path: \.bCloud, group: "brain"),
     ParamInfo(key: "bBrain", label: "脳の粒子の明るさ", min: 0, max: 2, step: 0.01, path: \.bBrain, group: "brain"),
+    ParamInfo(key: "bSolidCG", label: "面で描く区間", min: 0, max: 1, step: 1, path: \.bSolidCG, group: "brain"),
+    ParamInfo(key: "bSolidFrom", label: "面の始まり(秒)", min: 0, max: 360, step: 0.1, path: \.bSolidFrom, group: "brain"),
+    ParamInfo(key: "bSolidTo", label: "面の終わり(秒)", min: 0, max: 360, step: 0.1, path: \.bSolidTo, group: "brain"),
+    ParamInfo(key: "bSwell", label: "キックで膨らむ", min: 0, max: 0.5, step: 0.005, path: \.bSwell, group: "brain"),
+    ParamInfo(key: "bSwellHat", label: "クラップで膨らむ", min: 0, max: 0.5, step: 0.005, path: \.bSwellHat, group: "brain"),
+    ParamInfo(key: "bSwellDecay", label: "膨らみが引く秒数", min: 0.03, max: 1, step: 0.01, path: \.bSwellDecay, group: "brain"),
     ParamInfo(key: "bDots", label: "脳の粒を描く割合", min: 0.005, max: 1, step: 0.005, path: \.bDots, group: "brain"),
     ParamInfo(key: "bSolid", label: "うしろの粒を隠す", min: 0, max: 1, step: 1, path: \.bSolid, group: "brain"),
     ParamInfo(key: "bExposure", label: "全体の明るさ", min: 0.1, max: 5, step: 0.05, path: \.bExposure, group: "brain"),
@@ -380,6 +403,12 @@ let PARAMS: [ParamInfo] = [
     ParamInfo(key: "bScanSide", label: "両脇の CT の濃さ", min: 0, max: 1, step: 0.01, path: \.bScanSide, group: "brain"),
     ParamInfo(key: "bDissolveFrom", label: "脳がほどけ始める秒", min: 0, max: 360, step: 0.1, path: \.bDissolveFrom, group: "brain"),
     ParamInfo(key: "bDissolveTo", label: "ほどけきる秒", min: 0, max: 360, step: 0.1, path: \.bDissolveTo, group: "brain"),
+    ParamInfo(key: "bTint", label: "クラップ区間の粒子の色", min: 0, max: 1, step: 0.01, path: \.bTint, group: "brain"),
+    ParamInfo(key: "bStretch", label: "クラップで上下に伸ばす", min: 0, max: 1, step: 1, path: \.bStretch, group: "brain"),
+    ParamInfo(key: "bStretchKick", label: "キックで左右に伸ばす", min: 0, max: 1, step: 1, path: \.bStretchKick, group: "brain"),
+    ParamInfo(key: "bStretchKickDur", label: "左右の伸ばしが引く秒数", min: 0.03, max: 1.5, step: 0.01, path: \.bStretchKickDur, group: "brain"),
+    ParamInfo(key: "bWhite", label: "白い粒子の濃さ", min: 0.3, max: 4, step: 0.05, path: \.bWhite, group: "brain"),
+    ParamInfo(key: "bStretchDur", label: "伸ばしが引く秒数", min: 0.03, max: 1.5, step: 0.01, path: \.bStretchDur, group: "brain"),
     ParamInfo(key: "bReformFrom", label: "もう一度集まる秒", min: 0, max: 360, step: 0.1, path: \.bReformFrom, group: "brain"),
     ParamInfo(key: "bReformLen", label: "集まり直す長さ(秒)", min: 0.5, max: 60, step: 0.5, path: \.bReformLen, group: "brain"),
     ParamInfo(key: "bModel", label: "ドラマーのモデル", min: 0, max: 1, step: 1, path: \.bModel, group: "brain"),

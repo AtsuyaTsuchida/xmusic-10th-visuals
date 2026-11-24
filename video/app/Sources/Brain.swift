@@ -30,6 +30,7 @@ struct BrainUniforms {
     var h = SIMD4<Float>()      // 引き寄せる強さ, 漂うときの抵抗, 着いたあとの抵抗, 波形の点数
     var s = SIMD4<Float>()      // スキャン: 面の高さ, 帯が光る強さ, 帯の幅, 脳の粒を描く割合
     var w = SIMD4<Float>()      // 波形に並べる: 1 = 並べる, 波の高さ, 奥行きの波の強さ, 列の間隔
+    var mz = SIMD4<Float>()     // 面で描く脳: 出す量(0 = 粒子だけ, 1 = 面), 音で膨らむ量, 細かい凸凹の量, 0
     var w2 = SIMD4<Float>()     // 波形に並べる: 見せる列数(片側), 手前へ寄せる量, 画面の横幅の半分, 離したときに弾け飛ぶ速さ
     var color = SIMD4<Float>()
 }
@@ -38,7 +39,7 @@ func brainShaderSource() -> String {
     return """
 #include <metal_stdlib>
 using namespace metal;
-struct BU { float4x4 vp; float4 rot0; float4 rot1; float4 rot2; float4 a; float4 b; float4 c; float4 d; float4 e; float4 f; float4 g; float4 h; float4 s; float4 w; float4 w2; float4 color; };
+struct BU { float4x4 vp; float4 rot0; float4 rot1; float4 rot2; float4 a; float4 b; float4 c; float4 d; float4 e; float4 f; float4 g; float4 h; float4 s; float4 w; float4 mz; float4 w2; float4 color; };
 
 // 格子点 → 0..1 の乱数
 static float hash31(float3 p) {
@@ -220,7 +221,7 @@ vertex BOut brain_vs(uint vid [[vertex_id]], const device float4 *pos [[buffer(0
     float keep = max(u.s.w, 0.002);
     float h = fract(float(vid) * 0.6180339887 + pos[vid].w * 7.31);
     float shown = h < keep ? 0.5 / sqrt(keep) : 0.0;    // 全部は取り戻さない(隠さずに描くので、手前と奥の粒が重なって明るくなるぶんを引く)
-    float b = mix(cloud, u.e.w * shade * shown, arr);
+    float b = mix(cloud, u.e.w * shade * shown * (1.0 - u.mz.x), arr);     // 面で描いている間は、脳に着いた粒は出さない
     // スキャン: 面が通っている高さの粒子が、帯になって光る
     float sd = (p.y - u.s.x) / u.s.z;
     b *= 1.0 + u.s.y * exp(-sd * sd);
@@ -241,6 +242,37 @@ fragment float4 brain_fs(BOut in [[stage_in]], float2 pc [[point_coord]]) {
     float d = length(pc - 0.5) * 2.0;
     float a = exp(-d * d * 3.2) * (1.0 - smoothstep(0.75, 1.0, d));
     return float4(in.col * a, 1.0);
+}
+
+// 脳を、粒子ではなく「面」で描く(3DCG らしい、陰影のついた立体)。頂点 = メッシュの三角形の角、面の向きはなめらかにつないである。
+// 音に合わせて、面の向き(外向き)へ膨らむ
+struct SOut { float4 pos [[position]]; float3 n; float3 w; float lift; };
+vertex SOut brain_solid_vs(uint vid [[vertex_id]], const device float4 *vp [[buffer(0)]], const device float4 *vn [[buffer(1)]], constant BU &u [[buffer(4)]]) {
+    float3x3 R = float3x3(u.rot0.xyz, u.rot1.xyz, u.rot2.xyz);
+    float3 p0 = vp[vid].xyz, n = R * vn[vid].xyz;
+    // 膨らみ: 全体が外へふくらむ + 場所ごとのむら(しわの山がより出る)
+    float bump = noised(p0 * 9.0 + float3(0.0, u.a.y * 0.8, 0.0)).x;
+    float lift = u.mz.y * (0.75 + 0.25 * bump) + u.mz.z * bump;
+    float3 w = R * p0 * u.c.w * (1.0 + u.mz.y * 0.35) + n * lift;
+    float4 cp = u.vp * float4(w, 1.0);
+    cp.z = depth01(cp) * cp.w;
+    SOut o; o.pos = cp; o.n = n; o.w = w; o.lift = u.mz.y;
+    return o;
+}
+fragment float4 brain_solid_fs(SOut in [[stage_in]], constant BU &u [[buffer(4)]]) {
+    float3 n = normalize(in.n), v = normalize(u.f.xyz - in.w), l = normalize(u.g.xyz);
+    if (dot(n, v) < 0.0) n = -n;
+    float diff = max(dot(n, l), 0.0);
+    float fill = max(dot(n, normalize(float3(0.6, -0.2, 0.5))), 0.0);          // 反対側からの弱い光
+    float spec = pow(max(dot(n, normalize(l + v)), 0.0), 48.0);
+    float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    float3 base = float3(0.80, 0.78, 0.76);                                      // わずかに温かい灰色
+    float3 c = base * (0.06 + 0.95 * diff + 0.16 * fill) + float3(0.55) * spec + float3(0.30, 0.34, 0.42) * rim;
+    c *= 1.0 + 1.6 * in.lift;                                                    // 膨らんだ瞬間は、少し明るくなる
+    // スキャン: 面が通っている高さが帯になって光る
+    float sd = (in.w.y - u.s.x) / max(u.s.z, 0.005);
+    c += float3(0.9, 0.95, 1.0) * min(u.s.y, 3.0) * exp(-sd * sd);
+    return float4(c * u.mz.x * 0.62, 1.0);                                      // キックのブルームが乗っても白く飛ばない明るさ
 }
 
 // 線分(マス目の面と、原点の赤い線)。両端のあいだを、画面の上で太さのある四角にして描く
@@ -270,7 +302,7 @@ vertex LOut brain_line_vs(uint vid [[vertex_id]], uint iid [[instance_id]], cons
     // 遠い所は暗くする(奥で線が込み合って白く固まらないように)
     float far = mix(ca.w, cb.w, tt);
     float fade = mix(1.0, 0.18, saturate((far - u.e.y * 0.6) / (u.e.y * 1.6)));
-    o.col = (B.w > 0.5 ? float3(1.0, 0.05, 0.03) : u.color.rgb * fade) * A.w;
+    o.col = (B.w > 0.5 ? float3(1.0, 0.05, 0.03) : mix(u.color.rgb, float3(1.0), k.w) * fade) * A.w;     // k.w = 1 なら、粒子の色に関係なく白い線
     return o;
 }
 fragment float4 brain_line_fs(LOut in [[stage_in]]) {
@@ -319,7 +351,8 @@ struct COut { float4 pos [[position]]; float2 uv; };
 vertex COut brain_ct_vs(uint vid [[vertex_id]], constant BU &u [[buffer(4)]], constant float4 &k [[buffer(5)]]) {
     float sx = float(vid & 1) * 2.0 - 1.0, sz = float(vid >> 1) * 2.0 - 1.0;
     float3x3 R = float3x3(u.rot0.xyz, u.rot1.xyz, u.rot2.xyz);
-    float4 cp = u.vp * float4(R * float3(sx * k.y, k.x, sz * k.z), 1.0);
+    // 画像の中で、頭の中心は画像の中心より少し左・下(後ろ)にある。それが脳のモデルの中心に来るようにずらす
+    float4 cp = u.vp * float4(R * float3((sx + 0.02) * k.y, k.x, (sz - 0.114) * k.z), 1.0);
     cp.z = depth01(cp) * cp.w;
     COut o; o.pos = cp;
     o.uv = float2(0.5 - 0.5 * sx, 0.5 + 0.5 * sz);       // 画像の上 = 顔の側(脳の前)、画像の左 = 体の右
@@ -459,9 +492,12 @@ final class BrainScene {
     private let imgPipe: MTLRenderPipelineState
     private let mosaicPipe: MTLRenderPipelineState
     private let eqPipe: MTLRenderPipelineState
+    private let solidPipe: MTLRenderPipelineState
+    private var meshPos: MTLBuffer?, meshNrm: MTLBuffer?, meshCount = 0     // 面で描くときの頂点(三角形ごとに 3 つ)と、なめらかにつないだ面の向き
     private var eqTex: MTLTexture?       // 論文の数式を描いた絵(初めて使うときに作る)
     private var modelNow = false         // いま、ドラマーのモデルの地形を描いているか
     private var modelStep = 0
+    private var tintNow = 0.0            // いま粒子に色がついている度合い
     private var modelBlend = 0.0         // モデルへ入りきった度合い(0 → 1 を 0.3 秒で)
     struct MosaicU { var a = SIMD4<Float>(), b = SIMD4<Float>(), c = SIMD4<Float>() }
     private var mosaic: (u: MosaicU, stack: Int)? = nil    // このコマで画面を埋める CT(クラップの写真)。nil なら出さない
@@ -470,7 +506,10 @@ final class BrainScene {
     private var photoKey = "", photoNote = ""
     private var lastCT = SIMD4<Float>(), lastCTAlpha: Float = 0
     static let CT_TOP = 3.0, CT_BOTTOM = 30.0            // 脳のてっぺんと底にあたる輪切りの番号(0 始まり。一覧の絵を見て決めた)
-    static let CT_HALF = SIMD2<Double>(197.0 / 2 / MM, 255.0 / 2 / MM)   // 画像 1 枚の実際の大きさの半分(幅 約 197mm、奥行き 約 255mm)
+    // CT 画像 1 枚を置く大きさの半分。画像の中の頭の輪郭(幅 約 293 画素・前後 約 386 画素)が、脳のメッシュの輪郭(幅 128mm・前後 178mm)にそろうように決めた
+    // (画像全体は 幅 154mm、前後 210mm)。輪郭どうしをそろえるので、画像の中の脳は、モデルよりひと回り小さく写る
+    static let CT_HALF = SIMD2<Double>(153.8 / 2 / MM, 210.3 / 2 / MM)
+    static let TINT = SIMD3<Float>(0.25, 0.80, 1.00)     // キックとクラップの区間の粒子の色(水色)
     private let alwaysDS: MTLDepthStencilState
     private let segs: MTLBuffer          // マス目と赤い線の線分(毎コマ書き直す)
     static let GRID_CELLS = 20           // マス目の数(1 辺あたり)
@@ -540,6 +579,38 @@ final class BrainScene {
             throw err("粒子の置き場所を作れません")
         }
         pos = pb; vel = vb; tgt = tb; nrm = nb
+        // 面で描くときの頂点。同じ位置の頂点どうしで面の向きを足し合わせて、なめらかな陰影にする(三角形ごとの向きのままだと、角ばって見える)
+        do {
+            let inv0 = Float(1 / BrainScene.MM)
+            var acc = [SIMD3<Float>](repeating: .zero, count: tris.count)
+            var index = [SIMD3<Int32>: Int32](minimumCapacity: tris.count / 5)
+            var ids = [Int32](repeating: 0, count: tris.count)
+            var sums: [SIMD3<Float>] = []
+            for i in 0..<(tris.count / 3) {
+                let a = tris[3 * i], b = tris[3 * i + 1], c = tris[3 * i + 2]
+                let fn = simd_cross(b - a, c - a)                    // 長さ = 面積の 2 倍(大きい面ほど重く足す)
+                for k in 0..<3 {
+                    let v = tris[3 * i + k]
+                    let key = SIMD3<Int32>(Int32((v.x * 200).rounded()), Int32((v.y * 200).rounded()), Int32((v.z * 200).rounded()))
+                    var id = index[key] ?? -1
+                    if id < 0 { id = Int32(sums.count); index[key] = id; sums.append(.zero) }
+                    sums[Int(id)] += fn; ids[3 * i + k] = id
+                }
+            }
+            _ = acc; acc = []
+            let len2 = tris.count * MemoryLayout<SIMD4<Float>>.stride
+            if let mp = device.makeBuffer(length: len2, options: .storageModeShared), let mn = device.makeBuffer(length: len2, options: .storageModeShared) {
+                let MP = mp.contents().bindMemory(to: SIMD4<Float>.self, capacity: tris.count)
+                let MN = mn.contents().bindMemory(to: SIMD4<Float>.self, capacity: tris.count)
+                for i in 0..<tris.count {
+                    let m = tris[i] - center, s = sums[Int(ids[i])]
+                    let nn = s / max(1e-12, simd_length(s))
+                    MP[i] = SIMD4(m.x * inv0, m.z * inv0, -m.y * inv0, 1)   // 粒子の行き先と同じ向きの付け替え(x → 右, 上 → 上, 前 → 奥)
+                    MN[i] = SIMD4(nn.x, nn.z, -nn.y, 0)
+                }
+                meshPos = mp; meshNrm = mn; meshCount = tris.count
+            }
+        }
         let P = pb.contents().bindMemory(to: SIMD4<Float>.self, capacity: count)
         let V = vb.contents().bindMemory(to: SIMD4<Float>.self, capacity: count)
         let T = tb.contents().bindMemory(to: SIMD4<Float>.self, capacity: count)
@@ -624,6 +695,7 @@ final class BrainScene {
         mosaicPipe = try pipe("brain_tone_vs", "brain_mosaic_fs", .rgba8Unorm, depth: false, additive: false, write: true)
         rd.vertexFunction = lib.makeFunction(name: "brain_tone_vs"); rd.fragmentFunction = lib.makeFunction(name: "brain_eq_fs")
         eqPipe = try device.makeRenderPipelineState(descriptor: rd)
+        solidPipe = try pipe("brain_solid_vs", "brain_solid_fs", .rgba16Float, depth: true, additive: false, write: true)
         let d3 = MTLDepthStencilDescriptor(); d3.depthCompareFunction = .always; d3.isDepthWriteEnabled = false
         guard let s3 = device.makeDepthStencilState(descriptor: d3),
               let sb = device.makeBuffer(length: BrainScene.MAX_SEGS * 2 * MemoryLayout<SIMD4<Float>>.stride, options: .storageModeShared) else { throw err("線の置き場所を作れません") }
@@ -1035,6 +1107,18 @@ final class BrainScene {
         let frameEnd = (floor(t * Double(FPS) + 1e-6) + 1) / Double(FPS)
         let te = fixedStep ? frameEnd : t
         let kick = track.kickPulse(te, decay: 0.16)
+        // 面で描く区間(スキャンのあとの、キックとクラップの所。bSolidFrom〜bSolidTo): 脳を粒子でなく面で描き、音に合わせて膨らませる。出入りは 0.3 秒で入れ替える
+        let solidOn = P.bSolidCG >= 0.5 && wave == nil && meshCount > 0 ? smooth(P.bSolidFrom, P.bSolidFrom + 0.3, te) * (te < P.bSolidTo ? 1 : 0) : 0
+        var hatEnv = 0.0
+        if let hi = track.cueHat.lastIndex(where: { $0.t <= te }) { hatEnv = max(0, 1 - (te - track.cueHat[hi].t) / max(0.05, P.bScanDur)) }
+        // クラップ: 鳴ってから bSwellDecay の 1.5 倍の時間で引く
+        var clapEnv = 0.0
+        do {
+            var lo = 0, hi = track.cueClap.count
+            while lo < hi { let mm = (lo + hi) / 2; if track.cueClap[mm].t <= te { lo = mm + 1 } else { hi = mm } }
+            if lo > 0 { clapEnv = exp(-(te - track.cueClap[lo - 1].t) / max(0.01, P.bSwellDecay * 1.5)) }
+        }
+        let swell = P.bSwell * min(1.5, track.kickPulse(te, decay: P.bSwellDecay)) + P.bSwellHat * (hatEnv * hatEnv + clapEnv)
         let aspect = Double(W) / Double(H)
         let fov = 22.0 * .pi / 180
         let baseDist = 1 / tan(fov / 2)                           // 原点の高さ 2 単位が、画面の高さちょうどになる距離
@@ -1093,6 +1177,8 @@ final class BrainScene {
         if camFrom.isFinite { u.e.z *= Float(0.22 + 0.78 * smooth(camFrom + 0.1, camFrom + 1.4, te)) }
         // 脳へ集まる途中・ほどける途中は、粒が狭い所に固まって白く飛ぶので、そのあいだ雲の明るさを下げる
         u.e.z *= Float(1 - 0.75 * 4 * m * (1 - m))
+        // 白い粒子は濃く(明るく)する。色のついた区間と、ドラマーのモデルの区間はそのまま
+        if wave == nil, !modelNow { let wb = Float(1 + (P.bWhite - 1) * (1 - tintNow)); u.e.z *= wb; u.e.w *= wb }
         if P.bNeuro > 0.001 { u.e.w *= Float(1 + (P.bNeuroDim - 1) * smooth(0, 0.5, grownN)) }   // 網が出ている間は、脳の表面を暗くして中を見せる
         u.f = SIMD4(Float(eye.x), Float(eye.y), Float(eye.z), Float(2.4 * sc))
         // 光はカメラについて回る(どこから見ても、左上の手前から当たる)
@@ -1101,6 +1187,13 @@ final class BrainScene {
         u.g = SIMD4(light, 0.035)
         u.h = SIMD4(Float(P.bPull), 3.5, 13, Float(track.S))
         u.color = SIMD4(P.color, 1)
+        // キックとクラップの区間: 粒子に色をつける(0.4 秒で白から移る)
+        tintNow = 0
+        if wave == nil, P.bTint > 0.001 {
+            let k = Float(P.bTint * smooth(P.bDissolveFrom, P.bDissolveFrom + 0.4, te) * (te < P.bDissolveTo ? 1 : 0))
+            tintNow = Double(k)
+            u.color = SIMD4(P.color * (1 - k) + BrainScene.TINT * k, 1)
+        }
         // スキャン: ハイハットが鳴るたびに、水平な面が脳の上から下へ bScanDur 秒で降りる。出入りのところは明るさをなだらかに
         var scanY: Double? = nil, scanA = 0.0, scanX: Double? = nil
         if !modelNow, P.bScan > 0.001 || P.bScanLine > 0.001 {
@@ -1158,6 +1251,7 @@ final class BrainScene {
 
         // ---- 描く: 着いた粒子の奥行きを先に描き、そのあと全部の粒子を光の点として足し込む ----
         u.a = SIMD4(0, Float(simT), Float(modelNow ? modelBlend : m), Float(kick))
+        u.mz = SIMD4(Float(solidOn), Float(swell), Float(P.bSwellBump * (0.3 + min(1.5, kick))), 0)
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = hdr
         rp.colorAttachments[0].loadAction = .clear
@@ -1170,6 +1264,13 @@ final class BrainScene {
         enc.setVertexBuffer(pos, offset: 0, index: 0); enc.setVertexBuffer(vel, offset: 0, index: 1)
         enc.setVertexBuffer(tgt, offset: 0, index: 2); enc.setVertexBuffer(nrm, offset: 0, index: 3)
         enc.setVertexBytes(&u, length: MemoryLayout<BrainUniforms>.stride, index: 4)
+        if solidOn > 0.001, let mp = meshPos, let mn = meshNrm {          // 面で描く脳。奥行きも書くので、うしろの粒子や線は隠れる
+            enc.setRenderPipelineState(solidPipe); enc.setDepthStencilState(occDS)
+            enc.setVertexBuffer(mp, offset: 0, index: 0); enc.setVertexBuffer(mn, offset: 0, index: 1)
+            enc.setFragmentBytes(&u, length: MemoryLayout<BrainUniforms>.stride, index: 4)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: meshCount)
+            enc.setVertexBuffer(pos, offset: 0, index: 0); enc.setVertexBuffer(vel, offset: 0, index: 1)
+        }
         if m > 0.001, P.bSolid >= 0.5 {                  // うしろを隠すのは「面として見せる」ときだけ
             enc.setRenderPipelineState(occPipe); enc.setDepthStencilState(occDS)
             enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: count)
@@ -1180,7 +1281,7 @@ final class BrainScene {
         // 神経細胞の網: 脳が完成したあとの最初のキックから伸び始め、bNeuroDur 秒で脳じゅうに張り巡らされる。脳の表面に隠さず、光として足す
         if grownN > 0, P.bNeuro > 0.001, let nb = neuro {
             var k = SIMD4<Float>(Float(hdr.width), Float(hdr.height), Float(P.bNeuroW * sc), Float(grownN))
-            var k2 = SIMD4<Float>(Float(P.bNeuro * m * (modelNow ? 0 : 1)), Float(simT), Float(kick), 0)   // 脳がほどけたら、網も消える
+            var k2 = SIMD4<Float>(Float(P.bNeuro * m * (modelNow ? 0 : 1) * (1 - solidOn)), Float(simT), Float(kick), 0)   // 脳がほどけたら、網も消える
             enc.setRenderPipelineState(neuroPipe); enc.setDepthStencilState(alwaysDS)
             enc.setVertexBuffer(nb, offset: 0, index: 0)
             enc.setVertexBytes(&k, length: MemoryLayout<SIMD4<Float>>.stride, index: 5)
@@ -1189,7 +1290,7 @@ final class BrainScene {
         }
         let (nGrid, nRed) = writeLines(P, scanY: scanY, scanA: scanA)
         if nGrid + nRed > 0 {
-            var k = SIMD4<Float>(Float(hdr.width), Float(hdr.height), Float(P.bLineW * sc), 0)
+            var k = SIMD4<Float>(Float(hdr.width), Float(hdr.height), Float(P.bLineW * sc), 1)   // マス目の線は、粒子に色がついている間も白
             enc.setRenderPipelineState(linePipe)
             enc.setVertexBuffer(segs, offset: 0, index: 0)
             enc.setVertexBytes(&k, length: MemoryLayout<SIMD4<Float>>.stride, index: 5)

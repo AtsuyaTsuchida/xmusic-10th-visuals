@@ -8,6 +8,7 @@
 /video/*
 !/video/README.md
 !/video/export.sh
+!/video/export_mp4.sh
 !/video/tools/
 !/video/viz/
 !/video/app/
