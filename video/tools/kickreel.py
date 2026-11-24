@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 FPS = 30
-W, H = 1920, 540
+W, H = (int(v) for v in os.environ.get("REEL_SIZE", "1920x540").split("x"))    # 16:9 版は REEL_SIZE=1920x1080
 MIN_GAP = 2.5      # 同じ素材の中で、使う場所どうしを最低これだけ離す(秒)
 HOLD = 0.4         # 最後のキックのあとに出しておく秒数(アプリの seqVideoHold と同じ)
 EDGE = 0.5         # 素材の頭と終わりの、使わない幅(秒)

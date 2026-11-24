@@ -38,6 +38,7 @@ struct Options {
             case "--play": play = true
             case "--start": start = next().flatMap { Double($0) } ?? 0
             case "--warm": warm = next().flatMap { Double($0) } ?? 0
+            case "--size": _ = next()                    // 大きさは Params.swift の SIZE が読む。ここでは読み飛ばすだけ
             case "--export-raw": exportFrames = next().flatMap { Int($0) }
             case "--particles": if let n = next().flatMap({ Int($0) }), n > 0 { BRAIN_PARTICLES = n }
             case "--mute": mute = true

@@ -91,7 +91,7 @@ final class Typo {
             // アイコンの形が読めなかったときだけ、下の文字(Helvetica Neue Bold)に戻る
             if let lg = useLogo ? logo : icon {
                 // 上下に余白を取って、高さに合わせて中央に置く。形を型紙にして白で塗る
-                let lh = H * (useLogo ? 0.72 : 0.86) * CGFloat(scale), lw = lh * CGFloat(lg.width) / CGFloat(lg.height)
+                let lh = CGFloat(UNIT) * (useLogo ? 0.72 : 0.86) * CGFloat(scale), lw = lh * CGFloat(lg.width) / CGFloat(lg.height)
                 var rect = CGRect(x: (W - lw) / 2, y: (H - lh) / 2, width: lw, height: lh)
                 if !useLogo, let wm = wordmark {
                     // アイコンの右横に「NEUROMUSICLAB」を置く。2 つをひとかたまりとして中央に置き、文字は上下の中央にそろえる
@@ -167,7 +167,7 @@ final class DateStamp {
             guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                       space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
             ctx.clear(CGRect(x: 0, y: 0, width: W, height: H))
-            let size = H * 0.24
+            let size = CGFloat(UNIT) * 0.24
             let font = CTFontCreateWithName("HelveticaNeue-UltraLight" as CFString, size, nil)
             // 数字が変わっても位置が動かないよう、1 字ずつ同じ幅のますに置く(数字は 0 の幅、/ はその半分強)
             func width(_ ch: String) -> CGFloat {

@@ -772,7 +772,7 @@ final class Renderer {
         let turn = (P.turn * smooth(0.02, P.turnEnd, g) + spinAt(tk, enter: enterT, spin: P.spin)) * .pi / 180
         let xs = max(1, Int(P.xs.rounded())), cols = Int((Double(S) / Double(xs)).rounded(.up))
         let row0 = max(0, Int((JC - half).rounded(.down))), row1 = min(ROWS - 1, Int((JC + half).rounded(.up)))
-        let sc = Double(scale)
+        let sc = Double(scale) * PX
         let r = max(P.depth * 0.5, aspect) * 0.8
         // タイトルが出ている間は、ほかの絵を出さない(タイトルが消えるのに合わせて現れる)
         let tShow = still ? tk : t
@@ -1222,7 +1222,7 @@ final class Renderer {
         }
         func texel(_ t: MTLTexture) -> SIMD2<Float> { SIMD2(1 / Float(t.width), 1 / Float(t.height)) }
         if bloom > 0.0005 {
-            let size = Float(max(0.1, P.bloomSize))
+            let size = Float(max(0.1, P.bloomSize) * PX)
             for (i, lv) in glow.enumerated() {
                 if i == 0 {
                     let px = texel(scene)
@@ -1246,7 +1246,7 @@ final class Renderer {
         let key = "\(P.titleLine1)|\(P.titleLine2)|\(P.tSize)|\(P.tTrack)"
         if key == titleKey { return titleTex }
         titleKey = key
-        let w = target.width, h = target.height, sc = CGFloat(scale)
+        let w = target.width, h = target.height, sc = CGFloat(scale) * CGFloat(UNIT) / 540   // 16:9 では、画面の高さに見合うよう少し大きく
         var pixels = [UInt8](repeating: 0, count: w * h)
         let ok: Bool = pixels.withUnsafeMutableBytes { buf in
             guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,

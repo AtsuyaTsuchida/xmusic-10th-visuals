@@ -10,7 +10,19 @@ import simd
 //     Y(j) = 同じ瞬間から始まる波形を、奥行き方向に並べたもの
 // 値と計算は Web 版(video/viz/index.html)と同じ。
 
-let W = 1920, H = 540, FPS = 30      // 仕上がりの大きさとコマ数
+// 仕上がりの大きさ。既定は 1920x540(32:9)。起動時に `--size 1920x1080` を付けると 16:9 になる
+let SIZE: (Int, Int) = {
+    let a = CommandLine.arguments
+    if let i = a.firstIndex(of: "--size"), i + 1 < a.count {
+        let p = a[i + 1].lowercased().split(separator: "x").compactMap { Int($0) }
+        if p.count == 2, p[0] >= 64, p[1] >= 64 { return (p[0], p[1]) }
+    }
+    return (1920, 540)
+}()
+let W = SIZE.0, H = SIZE.1, FPS = 30
+let WIDE = Double(W) / Double(H) > 2.5                 // 横長(32:9)の画面か。false なら 16:9 など
+let PX = Double(H) / 540                               // 点や線の太さに掛ける倍率(縦 540 のときを 1 として、同じ見え方になるように)
+let UNIT = (Double(H) * Double(W) * 540 / 1920).squareRoot()   // ロゴや日付の大きさの基準(32:9 では 540。16:9 では縦と横の中間をとって 764)
 let ROWS = 401                       // 奥行きの列数(中央の列が最初の線)
 let JC = Double(ROWS - 1) / 2
 let YMAX = 32                        // 奥行き1列あたりの音の点数の上限
@@ -32,7 +44,7 @@ final class Params {
     var turnEnd = 0.6     // 回りきる広がり
     var spin = 0.0        // カメラが面の内部に入ってから、面が水平に回り続ける速さ(度/秒)。0 = 回さない(カメラが進むだけ)
     var tilt = 0.0        // 面を見下ろす角度(度)。0 = 面と同じ高さから水平に見る
-    var depth = 7.1       // 面の奥行き(画面の高さの半分 = 1)。7.1 で横幅と同じ = 正方形の面
+    var depth = WIDE ? 7.1 : 3.6   // 面の奥行き(画面の高さの半分 = 1)。7.1 で横幅と同じ = 正方形の面
     var fov = 22.0        // 遠近の強さ(度)
     var amp = 1.0         // 線だけのときの波の高さ
     var ampMesh = 0.30    // 面になったときの波の高さ
@@ -201,7 +213,7 @@ final class Params {
     var bHatCam = 1.0     // ハイハットの間は客観視のカメラにする(0 = しない)
     var bHatCamYaw = 35.0  // 客観視のカメラの向き(度)。毎回同じ場所
     var bHatCamPitch = 22.0 // 客観視のカメラの高さ(度)
-    var bHatCamZoom = 1.2 // 客観視のときの距離(標準を 1 として)
+    var bHatCamZoom = WIDE ? 1.2 : 1.7  // (16:9 では、両脇の CT と重ならないよう少し引く) 客観視のときの距離(標準を 1 として)
     var bScanSide = 1.0   // スキャン中に両脇へ出す CT の連番の濃さ(0 = 出さない)
     // 脳がほどける(脳のシーン): できあがった脳が、また Curl noise の雲に戻る。そのあと、もう一度集まる
     var bDissolveFrom = 121.6 // ほどけ始める時刻(秒)。v9 では、ハイハット(スキャン)が終わって、キックとクラップだけになる所
@@ -224,7 +236,7 @@ final class Params {
     var bModelSpin = 9.0  // カメラが回る速さ(度/秒)
     var bModelYaw = 15.0  // カメラの最初の向き(度)
     var bModelPitch = 27.0 // カメラの高さ(度)
-    var bModelZoom = 1.55 // カメラの距離(標準を 1 として)
+    var bModelZoom = WIDE ? 1.55 : 2.5  // (16:9 では、地形の全体が画面に収まる所まで引く) カメラの距離(標準を 1 として)
     var bModelMove = 1.0  // Curl noise の雲からモデルの地形へ、粒子が移るのにかける秒数
     var bModelH = 0.115   // 地形の高さの倍率
     var bEq = 0.92        // 数式の濃さ(0 = 出さない)

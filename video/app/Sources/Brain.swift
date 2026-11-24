@@ -467,7 +467,8 @@ func loadSTL(_ url: URL) throws -> [SIMD3<Float>] {
 
 final class BrainScene {
     static let MM = 92.5                 // 1 単位(画面の高さの半分)にあたる mm。脳の高さが画面の 6〜7 割になる
-    static let BOX = SIMD3<Float>(3.5, 1.05, 1.5)    // 粒子が漂う範囲(箱の半分の大きさ)。32:9 の画面いっぱい
+    // 粒子が漂う範囲(箱の半分の大きさ)。32:9 では横長、16:9 では画面の形に合わせて、引いたカメラに全体が収まる大きさにする
+    static let BOX = WIDE ? SIMD3<Float>(3.5, 1.05, 1.5) : SIMD3<Float>(2.3, 1.15, 1.5)
     let count: Int
     let triangles: Int
     private let device: MTLDevice
@@ -752,7 +753,7 @@ final class BrainScene {
     /// 論文(Fujii, Kudo, Ohtsuki, Oda, J Neurophysiol 2010)の式 (6) と (A2) を、数式用の書体(STIX Two)で組んだ絵。
     /// 変数は斜体、sin・cos・数字・かっこは立体、という数式の組み方の決まりに合わせる。白い文字で、地は透明
     private func makeEquationTexture() -> MTLTexture? {
-        let w = hdr.width, h = hdr.height, sc = CGFloat(h) / 540
+        let w = hdr.width, h = hdr.height, sc = CGFloat(w) / 1920 * (WIDE ? 1 : 1.12)   // 文字の大きさは横幅に合わせる
         var px = [UInt8](repeating: 0, count: w * h * 4)
         func font(_ names: [String], _ size: CGFloat) -> CTFont {
             for n in names { let f = CTFontCreateWithName(n as CFString, size, nil); if (CTFontCopyPostScriptName(f) as String) == n { return f } }
@@ -1007,7 +1008,7 @@ final class BrainScene {
                 m.c = SIMD4(A, r, lo, span)
                 switch ph.style {
                 case 0:     // その方向の断面を全部、順番に並べて画面を埋める
-                    let grid: [SIMD2<Float>] = [SIMD2(14, 3), SIMD2(15, 4), SIMD2(10, 4)]
+                    let grid: [SIMD2<Float>] = WIDE ? [SIMD2(14, 3), SIMD2(15, 4), SIMD2(10, 4)] : [SIMD2(9, 5), SIMD2(9, 7), SIMD2(7, 6)]
                     m.a = SIMD4(grid[ph.stack].x, grid[ph.stack].y, 0, 1); m.b = SIMD4(0, 0, 1.22, 0.5)
                     m.c = SIMD4(A, r, 0, n)
                 case 1:     // 画面いっぱいの 1 枚で、断面を順番に高速で再生する(クラップが鳴っている長さで、脳の上から下まで通る)
@@ -1027,7 +1028,7 @@ final class BrainScene {
         }
         // ---- スキャン中の両脇: 左に横断(スキャンの面と同じ番号)、右に矢状断を、スキャンと同じ進み方で順に送る ----
         if let sx = scanX, P.bScanSide > 0.001 {
-            let al = Float(P.bScanSide * scanA), h: Float = 0.94
+            let al = Float(P.bScanSide * scanA), h: Float = WIDE ? 0.94 : 0.40      // 16:9 では両脇が狭いので小さく置く
             let ra = Float(BrainScene.CT_ASPECT[0]), rs = Float(BrainScene.CT_ASPECT[2])
             add(0, Float(BrainScene.CT_TOP + (BrainScene.CT_BOTTOM - BrainScene.CT_TOP) * sx), cx: -(1 - ra * h / A - 0.02), lw: ra * h, lh: h, alpha: al)
             let sr = BrainScene.CT_RANGE[2]
@@ -1164,7 +1165,7 @@ final class BrainScene {
         u.b = SIMD4(Float(P.bCurl), Float(P.bFreq), Float(P.bEvolve), Float(P.bSheet))
         u.c = SIMD4(Float(P.bKick), Float(P.bPush), Float(P.bWave), Float(P.bScale))
         u.d = SIMD4(BrainScene.BOX, Float(BrainScene.SPREAD))
-        let sc = Double(scale)
+        let sc = Double(scale) * PX
         u.e = SIMD4(Float(P.bSize * sc), Float(baseDist), Float(P.bCloud * 4_194_304.0 / Double(count)), Float(P.bBrain * 4_194_304.0 / Double(count)))
         let nkey = "\(P.bMorph)|\(P.bStart)|\(P.bLen)|\(track.cueKick.count)"
         if nkey != neuroKey {
@@ -1363,7 +1364,7 @@ final class BrainScene {
         // 原点の赤い線を上に重ねる(脳の中にあっても見える)
         if lastRed > 0, mosaic == nil {                   // 写真で画面を埋めている間は出さない
             var u = lastU
-            var lk = SIMD4<Float>(Float(hdr.width), Float(hdr.height), Float(P.bLineW * Double(scale)), 0)
+            var lk = SIMD4<Float>(Float(hdr.width), Float(hdr.height), Float(P.bLineW * Double(scale) * PX), 0)
             enc.setRenderPipelineState(redPipe)
             enc.setVertexBuffer(segs, offset: 0, index: 0)
             enc.setVertexBytes(&u, length: MemoryLayout<BrainUniforms>.stride, index: 4)

@@ -7,15 +7,17 @@
 #   音のフェードは ffmpeg でかけている(映像側のフェードと同じ時刻・同じなめらかな曲線)。
 set -e
 cd "$(dirname "$0")"
-OUT="${1:-out/xmusic_10th_1920x540.mov}"
+SIZE="${SIZE:-1920x540}"          # 16:9 版は SIZE=1920x1080 ./export.sh
+if [ "$SIZE" = "1920x540" ]; then TAG=1920x540; else TAG=$SIZE; export KICKREEL="$(pwd)/work/kickreel_$SIZE.mp4" CYCLEREEL="$(pwd)/work/cyclereel_$SIZE.mp4"; fi
+OUT="${1:-out/xmusic_10th_$TAG.mov}"
 APP=app/build/WaveMesh.app/Contents/MacOS/WaveMesh
 AUDIO=../x-music-collage_v9_master.wav
 FADE_AT=302.1         # フェードが始まる時刻 = 最後のキック 296.7 + 0.4 + 5 秒
 FADE_LEN=5            # フェードの長さ(アプリの dateGlowLen と同じ)
 TOTAL=308.1           # 動画の長さ(秒)
 FRAMES=9243           # TOTAL × 30
-"$APP" --set mode=3 --export-raw $FRAMES 2>out/export_log.txt | ffmpeg -v error -y \
-  -f rawvideo -pix_fmt rgba -s 1920x540 -r 30 -i - -i "$AUDIO" \
+"$APP" --size $SIZE --set mode=3 --export-raw $FRAMES 2>out/export_log.txt | ffmpeg -v error -y \
+  -f rawvideo -pix_fmt rgba -s $SIZE -r 30 -i - -i "$AUDIO" \
   -filter_complex "[1:a]afade=t=out:st=${FADE_AT}:d=${FADE_LEN}:curve=hsin[a]" -map 0:v -map "[a]" \
   -c:v prores_ks -profile:v 4444xq -pix_fmt yuv444p10le -vendor apl0 -color_primaries bt709 -color_trc bt709 -colorspace bt709 \
   -c:a pcm_s24le -t $TOTAL "$OUT"
